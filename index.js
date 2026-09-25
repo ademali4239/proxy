@@ -1,47 +1,46 @@
-const http = require('http');
-const https = require('https');
+Deno.serve(async (req) => {
+  const url = new URL(req.url);
 
-const PORT = process.env.PORT || 10000;
+  // 1. Health check / Ping endpoint
+  if (url.pathname === '/ping' || url.pathname === '/ping/') {
+    return new Response('pong', {
+      status: 200,
+      headers: { 'Content-Type': 'text/plain' },
+    });
+  }
 
-const server = http.createServer((req, res) => {
-    // 1. Health check / Ping endpoint
-    if (req.url === '/ping' || req.url === '/ping/') {
-        res.writeHead(200, { 'Content-Type': 'text/plain' });
-        res.end('pong');
-        return;
-    }
+  // 2. Forward all other requests to Telegram API
+  const cleanPath = url.pathname.replace(/^\/+/, '/');
+  const targetUrl = new URL(cleanPath + url.search, 'https://api.telegram.org');
 
-    // 2. Forward all other requests to Telegram API
-    const telegramUrl = `https://api.telegram.org${req.url}`;
-    
-    // Copy ONLY essential headers to avoid Cloudflare/proxy block issues
-    const headers = {};
-    if (req.headers['content-type']) headers['content-type'] = req.headers['content-type'];
-    if (req.headers['content-length']) headers['content-length'] = req.headers['content-length'];
-    if (req.headers['user-agent']) headers['user-agent'] = req.headers['user-agent'];
+  // Copy essential headers
+  const headers = new Headers();
+  if (req.headers.has('content-type')) headers.set('content-type', req.headers.get('content-type'));
+  if (req.headers.has('content-length')) headers.set('content-length', req.headers.get('content-length'));
+  if (req.headers.has('user-agent')) headers.set('user-agent', req.headers.get('user-agent'));
+  headers.set('Host', 'api.telegram.org');
 
-    const options = {
-        method: req.method,
-        headers: headers
-    };
-
-    const proxyReq = https.request(telegramUrl, options, (proxyRes) => {
-        // Forward Telegram's headers back to your bot
-        res.writeHead(proxyRes.statusCode, proxyRes.headers);
-        // Stream the response back
-        proxyRes.pipe(res);
+  try {
+    const response = await fetch(targetUrl, {
+      method: req.method,
+      headers: headers,
+      body: req.method !== 'GET' && req.method !== 'HEAD' ? req.body : undefined,
+      redirect: 'follow',
     });
 
-    proxyReq.on('error', (err) => {
-        console.error('[Proxy Error] Request failed:', err.message);
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: false, error: 'Proxy Error', description: err.message }));
+    // Stream the Telegram response back to the bot
+    return new Response(response.body, {
+      status: response.status,
+      headers: response.headers,
     });
-
-    // Stream the incoming request body directly to Telegram
-    req.pipe(proxyReq);
-});
-
-server.listen(PORT, () => {
-    console.log(`Stream-based Telegram Proxy running on port ${PORT}`);
+  } catch (err) {
+    console.error('[Proxy Error] Request failed:', err.message);
+    return new Response(
+      JSON.stringify({ ok: false, error: 'Proxy Error', description: err.message }),
+      {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' },
+      }
+    );
+  }
 });
